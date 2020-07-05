@@ -20,6 +20,9 @@
 
 #include "esp_camera.h"
 #include "esp_timer.h"
+#include "ssd1306.h"
+
+#include "event_source.h"
 
 #include <esp_http_server.h>
 
@@ -73,7 +76,7 @@ static camera_config_t camera_config = {
     .fb_count = 1 //if more than one, i2s runs in continuous mode. Use only with JPEG
 };
 
-static const char *TAG = "TTGO_Camera_v2";
+static char *TAG = "TTGO_Camera_v2";
 
 esp_err_t camera_init2(){
     //power up the camera if PWDN pin is defined
@@ -215,6 +218,43 @@ static void connect_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+SSD1306_t dev;
+#define PIR_SENSOR_PIN 33
+int blink = 0;
+
+// Handler which executes when the timer expiry event gets executed by the loop.
+static void timer_expiry_handler(void* handler_args, esp_event_base_t base, int32_t id, void* event_data)
+{
+	if(gpio_get_level(PIR_SENSOR_PIN))
+	{
+		ssd1306_display_text(&dev, 6, "Pir Sensor On ", 14, true);
+	}
+	else
+	{
+		ssd1306_display_text(&dev, 6, "Pir Sensor Off", 14, false);
+	}
+	if(blink)
+	{
+		blink = 0;
+		ssd1306_display_text(&dev, 7, " ", 1, false);
+	}
+	else
+	{
+		blink = 1;
+		ssd1306_display_text(&dev, 7, " ", 1, true);
+	}
+}
+
+// Callback that will be executed when the timer period lapses. Posts the timer expiry event
+// to the default event loop.
+static void timer_callback(void* arg)
+{
+     ESP_ERROR_CHECK(esp_event_post(TIMER_EVENTS, TIMER_EVENT_EXPIRY, NULL, 0, portMAX_DELAY));
+}
+
+esp_timer_handle_t TIMER;
+/* Event source periodic timer related definitions */
+ESP_EVENT_DEFINE_BASE(TIMER_EVENTS);
 
 void app_main()
 {
@@ -246,4 +286,43 @@ void app_main()
 
     /* Start the server for the first time */
     server = start_webserver();
+
+#if CONFIG_I2C_INTERFACE
+	ESP_LOGI(TAG, "INTERFACE is i2c");
+	ESP_LOGI(TAG, "CONFIG_SDA_GPIO=%d",CONFIG_SDA_GPIO);
+	ESP_LOGI(TAG, "CONFIG_SCL_GPIO=%d",CONFIG_SCL_GPIO);
+	ESP_LOGI(TAG, "CONFIG_RESET_GPIO=%d",CONFIG_RESET_GPIO);
+	i2c_master_init(CONFIG_SDA_GPIO, CONFIG_SCL_GPIO, CONFIG_RESET_GPIO);
+#if CONFIG_SSD1306_128x64
+	ESP_LOGI(TAG, "Panel is 128x64");
+	i2c_init(&dev, 128, 64, 0x3C);
+#endif // CONFIG_SSD1306_128x64
+#endif // CONFIG_I2C_INTERFACE
+
+	ssd1306_clear_screen(&dev, false);
+	ssd1306_contrast(&dev, 0xff);
+	ssd1306_display_text(&dev, 0, TAG, 14, false);
+	ssd1306_display_text(&dev, 1, " SSD1306 128x64", 15, false);
+
+	tcpip_adapter_ip_info_t s_ip_info;
+	char char_ip_addr[16];
+	int strLen;
+
+	ssd1306_display_text(&dev, 3, "IP address:", 11, false);
+
+	tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &s_ip_info);
+	strLen = sprintf(char_ip_addr, IPSTR, IP2STR(&s_ip_info.ip));
+	ssd1306_display_text(&dev, 4, char_ip_addr, strLen, false);
+
+    gpio_set_direction(PIR_SENSOR_PIN, GPIO_MODE_INPUT);
+
+    ESP_ERROR_CHECK(esp_event_handler_register(TIMER_EVENTS, TIMER_EVENT_EXPIRY, timer_expiry_handler, NULL));
+
+    // Create and start the event sources
+    esp_timer_create_args_t timer_args = {
+        .callback = &timer_callback,
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &TIMER));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(TIMER, TIMER_PERIOD));
 }
